@@ -10,8 +10,25 @@ file_formatter = logging.Formatter(u'%(asctime)s::%(name)s::%(levelname)s::%(mes
 console_formatter = logging.Formatter(u'%(levelname)s  %(message)s')
 
 
-class LevelFilter(logging.Filter):
+class LoggerWriter(object):
+    """Allows to redirect stream to logger"""
+
     def __init__(self, level):
+        self.level = level
+        self.errors = None
+
+    def write(self, message):
+        if message not in ('\n', ''):
+            self.level(message.rstrip('\n'))
+
+    def flush(self):
+        pass
+
+
+class LevelFilter(logging.Filter):
+
+    def __init__(self, level):
+        super(LevelFilter, self).__init__(level)
         self.level = level
 
     def filter(self, record):
@@ -37,6 +54,6 @@ def register_file_log_handler(log_file, level=logging.DEBUG, fmt=file_formatter)
 
 def register_console_log_handler(level=logging.INFO, fmt=console_formatter):
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.addFilter(LevelFilter(level))
+    console_handler.setLevel(level)
     console_handler.setFormatter(fmt)
     logger.addHandler(console_handler)

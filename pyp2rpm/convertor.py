@@ -15,7 +15,13 @@ try:
 except ImportError:
     import xmlrpc.client as xmlrpclib
 
+try:
+    import dnf
+except ImportError:
+    dnf = None
+
 import jinja2
+import pprint
 
 from pyp2rpm import exceptions
 from pyp2rpm import filters
@@ -36,24 +42,24 @@ class Convertor(object):
                  distro=settings.DEFAULT_DISTRO,
                  base_python_version=settings.DEFAULT_PYTHON_VERSION,
                  python_versions=[],
-                 rpm_name=None, proxy=None):
+                 rpm_name=None, proxy=None, venv=True):
         self.package = package
         self.version = version
         self.save_dir = save_dir
         self.base_python_version = base_python_version
-        self.python_versions = python_versions
+        self.python_versions = list(python_versions)
         self.template = template
-        self.name_convertor = name_convertor.NameConvertor(distro)
+        self.distro = distro
         if not self.template.endswith('.spec'):
             self.template = '{0}.spec'.format(self.template)
         self.rpm_name = rpm_name
         self.proxy = proxy
+        self.venv = venv
         self.pypi = True
         suffix = os.path.splitext(self.package)[1]
         if os.path.exists(self.package) and suffix in settings.ARCHIVE_SUFFIXES\
-            and not os.path.isdir(self.package):
+                and not os.path.isdir(self.package):
             self.pypi = False
-
 
     def convert(self):
         """Returns RPM SPECFILE.
@@ -74,9 +80,17 @@ class Convertor(object):
         self.name, self.version = self.getter.get_name_version()
 
         self.local_file = local_file
-        data = self.metadata_extractor.extract_data()
-        data.base_python_version = self.base_python_version
-        data.python_versions = self.python_versions
+        data = self.metadata_extractor.extract_data(self.client)
+        logger.debug('Extracted metadata:')
+        logger.debug(pprint.pformat(data.data))
+
+        if self.base_python_version or self.python_versions:
+            data.base_python_version = self.base_python_version
+            data.python_versions = [v for v in self.python_versions
+                                    if not v == data.base_python_version]
+        elif data.base_python_version in data.python_versions:
+            data.python_versions.remove(data.base_python_version)
+
         jinja_env = jinja2.Environment(loader=jinja2.ChoiceLoader([
             jinja2.FileSystemLoader(['/']),
             jinja2.PackageLoader('pyp2rpm', 'templates'), ]))
@@ -112,8 +126,8 @@ class Convertor(object):
                 self._getter = package_getters.LocalFileGetter(
                     self.package,
                     self.save_dir)
-                logger.debug('{0} doesnt exists as local file trying PyPI.'.format(self.package))
             else:
+                logger.debug('{0} doesnt exists as local file trying PyPI.'.format(self.package))
                 self._getter = package_getters.PypiDownloader(
                     self.client,
                     self.package,
@@ -140,35 +154,41 @@ class Convertor(object):
         self._local_file = value
 
     @property
+    def name_convertor(self):
+        if not hasattr(self, '_name_convertor'):
+            if dnf is None:
+                self._name_convertor = name_convertor.NameConvertor(self.distro)
+            else:
+                self._name_convertor = name_convertor.DandifiedNameConvertor(self.distro)
+        return self._name_convertor
+
+    @property
     def metadata_extractor(self):
-        """Returns an instance of proper MetadataExtractor subclass. Always returns the same instance.
+        """Returns an instance of proper MetadataExtractor subclass. 
+        Always returns the same instance.
 
         Returns:
-            The proper MetadataExtractor subclass according to provided argument.
+            The proper MetadataExtractor subclass according to local file suffix.
         """
         if not hasattr(self, '_local_file'):
             raise AttributeError(
                 'local_file attribute must be set before calling metadata_extractor')
-
         if not hasattr(self, '_metadata_extractor'):
-            if self.pypi:
-                logger.info('Getting metadata from PyPI.')
-                self._metadata_extractor = metadata_extractors.PypiMetadataExtractor(
-                    self.local_file,
-                    self.name,
-                    self.name_convertor,
-                    self.version,
-                    self.client,
-                    self.rpm_name,
-                    self.base_python_version)
+            if self.local_file.endswith('.whl'):
+                logger.info('Getting metadata from wheel using WheelMetadataExtractor.')
+                extractor_cls = metadata_extractors.WheelMetadataExtractor
             else:
-                logger.info('Getting metadata from local file.')
-                self._metadata_extractor = metadata_extractors.LocalMetadataExtractor(
-                    self.local_file,
-                    self.name,
-                    self.name_convertor,
-                    self.version,
-                    self.rpm_name)
+                logger.info('Getting metadata from setup.py using DistMetadataExtractor.')
+                extractor_cls = metadata_extractors.DistMetadataExtractor
+
+            self._metadata_extractor = extractor_cls(
+                self.local_file,
+                self.name,
+                self.name_convertor,
+                self.version,
+                self.rpm_name,
+                self.venv,
+                self.base_python_version)
 
         return self._metadata_extractor
 

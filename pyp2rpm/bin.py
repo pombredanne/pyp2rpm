@@ -1,5 +1,6 @@
 import getpass
 import logging
+import os
 
 from pyp2rpm.convertor import Convertor
 from pyp2rpm import settings
@@ -14,7 +15,7 @@ CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
 
 @click.command(context_settings=CONTEXT_SETTINGS)
 @click.option('-t',
-              help='Template file (jinja2 format) to render (default: "{0}").' 
+              help='Template file (jinja2 format) to render (default: "{0}").'
               'Search order is 1) filesystem, 2) default templates.'.format(
                   settings.DEFAULT_TEMPLATE),
               metavar='TEMPLATE')
@@ -31,12 +32,16 @@ CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
               metavar='BASE_PYTHON')
 @click.option('-p',
               help='Additional Python versions to include in the specfile (e.g -p3 for %%{0}).'
-              'Can be specified multiple times (default: "{1}"). Specify additional version'
+              'Can be specified multiple times (default: "{1}"). Specify additional version '
               'or use -b explicitly to disable default.'.format(
                   '{?with_python3}', settings.DEFAULT_ADDITIONAL_VERSION),
               default=[],
               multiple=True,
               metavar='PYTHON_VERSIONS')
+@click.option('-s',
+              help='Spec file ~/rpmbuild/SPECS/python-package_name.spec will be created (default: '
+              'prints spec file to stdout).',
+              is_flag=True)
 @click.option('--srpm',
               help='When used pyp2rpm will produce srpm instead of printing specfile into stdout.',
               is_flag=True)
@@ -55,9 +60,11 @@ CONTEXT_SETTINGS = dict(help_option_names=['-h', '--help'])
               metavar='SAVE_PATH')
 @click.option('-v', help='Version of the package to download (ignored for local files).',
               metavar='VERSION')
+@click.option('--venv / --no-venv',
+              default=True,
+              help='Enable / disable metadata extraction from virtualenv (default: enabled).')
 @click.argument('package', nargs=1)
-
-def main(package, v, d, r, proxy, srpm, p, b, o, t):
+def main(package, v, d, s, r, proxy, srpm, p, b, o, t, venv):
     """Convert PyPI package to RPM specfile or SRPM.
 
     \b
@@ -65,16 +72,8 @@ def main(package, v, d, r, proxy, srpm, p, b, o, t):
     PACKAGE             Provide PyPI name of the package or path to compressed source file."""
     register_file_log_handler('/tmp/pyp2rpm-{0}.log'.format(getpass.getuser()))
 
-    if not p and not b:
-        p = settings.DEFAULT_ADDITIONAL_VERSION
-    if not b:
-        b = settings.DEFAULT_PYTHON_VERSION
-    
-    p = list(p)
-    if b in p:
-        p.remove(b)
-
-    if srpm:
+    if srpm or s:
+        settings.CONSOLE_LOGGING = True
         register_console_log_handler()
 
     distro = o
@@ -93,18 +92,19 @@ def main(package, v, d, r, proxy, srpm, p, b, o, t):
                           base_python_version=b,
                           python_versions=p,
                           rpm_name=r,
-                          proxy=proxy)
+                          proxy=proxy,
+                          venv=venv)
 
     logger.debug('Convertor: {0} created. Trying to convert.'.format(convertor))
     converted = convertor.convert()
     logger.debug('Convertor: {0} succesfully converted.'.format(convertor))
 
-    if srpm:
-
+    if srpm or s:
         if r:
             spec_name = r + '.spec'
         else:
-            spec_name = 'python-' + convertor.name + '.spec'
+            prefix = 'python-' if not convertor.name.startswith('python-') else ''
+            spec_name = prefix + convertor.name + '.spec'
         logger.info('Using name: {0} for specfile.'.format(spec_name))
         if d == settings.DEFAULT_PKG_SAVE_PATH:
             # default save_path is rpmbuild tree so we want to save spec
@@ -113,16 +113,23 @@ def main(package, v, d, r, proxy, srpm, p, b, o, t):
         else:
             # if user provide save_path then save spec in provided path
             spec_path = d + '/' + spec_name
+        spec_dir = os.path.dirname(spec_path)
+        if not os.path.exists(spec_dir):
+            os.makedirs(spec_dir)
         logger.debug('Opening specfile: {0}.'.format(spec_path))
+
+        if not utils.PY3:
+            converted = converted.encode('utf-8')
         with open(spec_path, 'w') as f:
             f.write(converted)
             logger.info('Specfile saved at: {0}.'.format(spec_path))
 
-        msg = utils.build_srpm(spec_path, d)
-        if utils.PY3:
-            logger.info(msg.decode('utf-8'))
-        else:
-            logger.info(msg)
+        if srpm:
+            msg = utils.build_srpm(spec_path, d)
+            if utils.PY3:
+                logger.info(msg.decode('utf-8'))
+            else:
+                logger.info(msg)
 
     else:
         logger.debug('Printing specfile to stdout.')
